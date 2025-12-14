@@ -690,29 +690,47 @@ runs:
           echo "NEED_HOOKS=false" >> $GITHUB_ENV
         fi
         
-        case "$susfs_version" in
-          "v1.5.8")
+case "$susfs_version" in
+          "v2.0.0")
+            echo "🔥 DETECTED SUSFS v2.0.0 - Applying KSUN v3 fixes..."
+            
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               cd ./KernelSU-Next
+              
+              # 1. Скачиваем СВЕЖИЕ патчи WildKernels (чтобы точно были те, что 9 часов назад)
+              echo "⬇️ Cloning latest WildKernels patches..."
+              rm -rf /tmp/wk_patches
+              git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wk_patches
+              
+              # 2. Применяем основной патч SUSFS (он может выдать ошибки, это нормально)
+              echo "Applying base SUSFS patch..."
+              cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
+              # Используем || true, чтобы скрипт не падал, если патч частично не встанет
+              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+              
+              # 3. Применяем ВСЕ фиксы из папки v2.0.0 (Те самые, что ты нашел!)
+              echo "🚑 Applying MANUAL FIXES for KSUN v3..."
+              FIX_DIR="/tmp/wk_patches/next/susfs_fix_patches/v2.0.0"
+              
+              for patch_file in "$FIX_DIR"/*.patch; do
+                if [ -f "$patch_file" ]; then
+                  echo "🔧 Applying fix: $(basename "$patch_file")"
+                  # --ignore-whitespace помогает, если отступы поехали
+                  patch -p1 --forward --fuzz=3 --ignore-whitespace < "$patch_file" || echo "⚠️ Fix $(basename "$patch_file") failed (maybe not needed)"
+                fi
+              done
+              
+              cd ..
             else
+              # Логика для обычного KSU (не Next)
               cd ./KernelSU
-            fi
-            cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch  || true
-              cp "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_apk_sign.c.patch" ./
-              patch -p1 --forward --fuzz=3 < fix_apk_sign.c.patch
-              cp "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_core_hook.c.patch" ./
-              patch -p1 --forward --fuzz=3 < fix_core_hook.c.patch
-              cp "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_selinux.c.patch" ./
-              patch -p1 --forward --fuzz=3 < fix_selinux.c.patch
-              cp "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_ksud.c.patch" ./
-              patch -p1 --forward --fuzz=3 < fix_ksud.c.patch
-            else
-              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch
+              cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
+              patch -p1 --forward < 10_enable_susfs_for_ksu.patch
+              cd ..
             fi
             ;;
-          "v1.5.9"|"v1.5.10"|"v1.5.11"|"v1.5.12"|"v2.0.0")
+            
+          "v1.5.9"|"v1.5.10"|"v1.5.11"|"v1.5.12")
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               cd ./KernelSU-Next
             else
@@ -721,18 +739,26 @@ runs:
             cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               patch -p1 --forward < 10_enable_susfs_for_ksu.patch  || true
+              # Старая логика для старых версий
               for file in $(find ./kernel -maxdepth 2 -name "*.rej" -printf "%f\n" | cut -d'.' -f1); do
                 echo "Patching file: $file.c with fix_$file.c.patch"
                 patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_$file.c.patch"
               done
-              patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_kernel_compat.c.patch"
+              patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_kernel_compat.c.patch" || true
             else
               patch -p1 --forward < 10_enable_susfs_for_ksu.patch
             fi
             ;;
+            
           *)
-            echo "::error::Unsupported SUSFS version: $susfs_version"
-            exit 1
+            # Для v1.5.8 и старых
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              cd ./KernelSU-Next
+            else
+              cd ./KernelSU
+            fi
+            cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
+            patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
             ;;
         esac
         

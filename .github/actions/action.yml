@@ -434,7 +434,7 @@ runs:
         echo "::group::Apply SUSFS patches"
         cd "$CONFIG/kernel_platform"
         
-        # 1. Copy SUSFS patches to common folder (Important for GKI!)
+        # 1. Copy SUSFS patches to common folder
         echo "Copying SUSFS patches..."
         cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch ./common/
         cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -444,7 +444,7 @@ runs:
         echo "SUSVER=$susfs_version" >> $GITHUB_ENV
         echo "Detected SUSFS Version: $susfs_version"
         
-        # 2. Apply KERNEL patch (Must be inside 'common' folder)
+        # 2. Apply KERNEL patch
         echo "Entering common folder to apply kernel patch..."
         cd common
         if [ -f "50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch" ]; then
@@ -487,13 +487,20 @@ runs:
           echo "⚠️ Fix directory not found (Is SUSFS < v2.0.0?), skipping manual fixes."
         fi
         
-        # --- Fix for Linking Error (Undefined Symbols) ---
+        # --- FIX: FORCE KSU_SUSFS COMPILATION (FIXED PATH) ---
         echo "🔧 Fixing Makefile for ksu_susfs..."
-        if ! grep -q "ksu_susfs.o" Makefile; then
-           echo "Adding ksu_susfs.o to KernelSU Makefile"
-           # Insert object file into ksu-y list
-           sed -i '$a ksu-y += ksu_susfs.o' Makefile
+        if [ -f "kernel/Makefile" ]; then
+            if ! grep -q "ksu_susfs.o" kernel/Makefile; then
+               echo "Adding ksu_susfs.o to kernel/Makefile"
+               sed -i '$a ksu-y += ksu_susfs.o' kernel/Makefile
+            else
+               echo "ksu_susfs.o already present in kernel/Makefile"
+            fi
+        else
+            echo "❌ Error: kernel/Makefile not found in $(pwd)"
+            ls -R
         fi
+        # ----------------------------------------
         
         cd ..
         

@@ -99,6 +99,7 @@ runs:
         
         errors=()
         if [[ -z "$model" ]]; then errors+=("Input 'model' cannot be empty"); fi
+        if [[ -z "$soc" ]]; then errors+=("Input 'soc' cannot be empty"); fi
         
         case "$optimize" in
           O2|O3) ;;
@@ -388,7 +389,10 @@ runs:
         # --- СМЕНА РЕПОЗИТОРИЯ НА WILD KSU (ЕСЛИ SUSFS ВКЛЮЧЕН) ---
         if [ "${{ env.OP_SUSFS }}" = "true" ]; then
            echo "🌲 SUSFS Enabled: Using WildKernels/Wild_KSU (Pre-patched)..."
-           # Используем готовый скрипт от James, который ставит Wild KSU (с SUSFS внутри)
+           # 1. Скачиваем вручную, чтобы контролировать имя папки
+           git clone --depth=1 -b wild https://github.com/WildKernels/Wild_KSU.git KernelSU-Next
+           
+           # 2. Запускаем setup.sh внутри (он настроит ссылки)
            curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" | bash -s wild
         else
            # Стандартный путь (без SUSFS)
@@ -400,16 +404,45 @@ runs:
            fi
         fi
         
+        # Проверяем структуру (для отладки)
+        echo "📂 Checking folder structure:"
+        ls -F
+        
         git submodule update --init --recursive
-        cd KernelSU-Next/kernel
+        
+        # Если папка называется Wild_KSU (из-за скрипта setup), делаем симлинк
+        if [ -d "Wild_KSU" ] && [ ! -d "KernelSU-Next" ]; then
+            echo "🔗 Linking Wild_KSU to KernelSU-Next..."
+            ln -s Wild_KSU KernelSU-Next
+        fi
+        
+        # Заходим в папку с ядром модуля
+        if [ -d "KernelSU-Next/kernel" ]; then
+            cd KernelSU-Next/kernel
+        elif [ -d "Wild_KSU/kernel" ]; then
+            cd Wild_KSU/kernel
+        else
+            echo "❌ Error: KernelSU kernel directory not found!"
+            exit 1
+        fi
         
         # Получаем версию для логов
         BASE_VERSION=10200
         KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" $BASE_VERSION)
         sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" Makefile
         
-        cd ..
-        KSU_COMMIT_SHA=$(git rev-parse HEAD)
+        cd ../..
+        # Возвращаемся в корень kernel_platform
+        
+        # Получаем SHA (аккуратно)
+        if [ -d "KernelSU-Next" ]; then
+            cd KernelSU-Next
+            KSU_COMMIT_SHA=$(git rev-parse HEAD)
+            cd ..
+        else
+            KSU_COMMIT_SHA="unknown"
+        fi
+        
         echo "KSU_COMMIT_SHA=$KSU_COMMIT_SHA" >> $GITHUB_ENV
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         echo "::endgroup::"

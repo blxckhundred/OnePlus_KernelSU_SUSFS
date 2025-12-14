@@ -99,7 +99,6 @@ runs:
         
         errors=()
         if [[ -z "$model" ]]; then errors+=("Input 'model' cannot be empty"); fi
-        if [[ -z "$soc" ]]; then errors+=("Input 'soc' cannot be empty"); fi
         
         case "$optimize" in
           O2|O3) ;;
@@ -385,17 +384,30 @@ runs:
         set -euo pipefail
         echo "::group::Add KernelSU Next"
         cd "$CONFIG/kernel_platform"
-        echo "Adding KernelSU Next..."
-        if [ "${{ inputs.ksu_branch_or_hash }}" = "" ]; then
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        
+        # --- СМЕНА РЕПОЗИТОРИЯ НА WILD KSU (ЕСЛИ SUSFS ВКЛЮЧЕН) ---
+        if [ "${{ env.OP_SUSFS }}" = "true" ]; then
+           echo "🌲 SUSFS Enabled: Using WildKernels/Wild_KSU (Pre-patched)..."
+           # Используем готовый скрипт от James, который ставит Wild KSU (с SUSFS внутри)
+           curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" | bash -s wild
         else
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${{ inputs.ksu_branch_or_hash }}"
+           # Стандартный путь (без SUSFS)
+           echo "Adding Official KernelSU Next..."
+           if [ "${{ inputs.ksu_branch_or_hash }}" = "" ]; then
+             curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+           else
+             curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${{ inputs.ksu_branch_or_hash }}"
+           fi
         fi
+        
         git submodule update --init --recursive
         cd KernelSU-Next/kernel
+        
+        # Получаем версию для логов
         BASE_VERSION=10200
         KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" $BASE_VERSION)
         sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" Makefile
+        
         cd ..
         KSU_COMMIT_SHA=$(git rev-parse HEAD)
         echo "KSU_COMMIT_SHA=$KSU_COMMIT_SHA" >> $GITHUB_ENV
@@ -434,8 +446,8 @@ runs:
         echo "::group::Apply SUSFS patches"
         cd "$CONFIG/kernel_platform"
         
-        # 1. Copy SUSFS patches to common folder
-        echo "Copying SUSFS patches..."
+        # 1. Копируем патчи SUSFS (только для ядра!)
+        echo "Copying SUSFS kernel patches..."
         cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch ./common/
         cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
         cp ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
@@ -444,71 +456,17 @@ runs:
         echo "SUSVER=$susfs_version" >> $GITHUB_ENV
         echo "Detected SUSFS Version: $susfs_version"
         
-        # 2. Apply KERNEL patch
-        echo "Entering common folder to apply kernel patch..."
+        # 2. Применяем патч на ЯДРО (Kernel Patch)
+        echo "Applying Kernel Patch..."
         cd common
         if [ -f "50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch" ]; then
            patch -p1 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch
         else
-           echo "::error::Kernel patch not found in common/"
+           echo "::error::Kernel patch not found!"
            exit 1
         fi
-        cd ..
-        echo "Kernel patch applied."
-
-        # 3. Clone James's fixes for KSUN v3
-        echo "⬇️ Cloning WildKernels patches..."
-        rm -rf /tmp/wk_patches
-        git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wk_patches
         
-        # 4. Apply KernelSU patches
-        if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-          cd ./KernelSU-Next
-        else
-          cd ./KernelSU
-        fi
-        
-        echo "Copying KernelSU SUSFS files..."
-        # COPY ALL FILES from kernel_patches/KernelSU (including ksu_susfs.c/h)
-        cp ../../../susfs4ksu/kernel_patches/KernelSU/* ./
-        
-        echo "Applying base SUSFS patch to KernelSU..."
-        # Try applying base patch
-        patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
-        
-        echo "🚑 Applying MANUAL FIXES from WildKernels repo..."
-        FIX_DIR="/tmp/wk_patches/next/susfs_fix_patches/v2.0.0"
-        
-        if [ -d "$FIX_DIR" ]; then
-          for patch_file in "$FIX_DIR"/*.patch; do
-            if [ -f "$patch_file" ]; then
-              echo "🔧 Applying fix: $(basename "$patch_file")"
-              patch -p1 --forward --fuzz=3 --ignore-whitespace -f < "$patch_file" || echo "⚠️ Fix $(basename "$patch_file") skipped"
-            fi
-          done
-        else
-          echo "⚠️ Fix directory not found (Is SUSFS < v2.0.0?), skipping manual fixes."
-        fi
-        
-        # --- FIX: FORCE KSU_SUSFS COMPILATION ---
-        echo "🔧 Fixing Makefile for ksu_susfs..."
-        if [ -f "kernel/Makefile" ]; then
-            if ! grep -q "ksu_susfs.o" kernel/Makefile; then
-               echo "Adding ksu_susfs.o to kernel/Makefile"
-               sed -i '$a ksu-y += ksu_susfs.o' kernel/Makefile
-            else
-               echo "ksu_susfs.o already present in kernel/Makefile"
-            fi
-        else
-            echo "❌ Error: kernel/Makefile not found in $(pwd)"
-            ls -R
-        fi
-        # ----------------------------------------
-        
-        cd ..
-        
-        # 5. Android 12 vma_pages workaround
-        cd ./common
+        # 3. Android 12 vma_pages workaround
         if [ "${{ env.ANDROID_VER }}" = "android12" ] && [ "${{ env.KERNEL_VER }}" = "5.10" ]; then
           if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
              echo "Applying Android 12 vma_pages workaround..."
@@ -516,7 +474,8 @@ runs:
           fi
         fi
         
-        echo "✅ SUSFS patches applied"
+        cd ..
+        echo "✅ SUSFS Kernel patches applied. (KSU patching skipped as we use Wild KSU)"
         echo "::endgroup::"
 
     - name: Apply Other Patches

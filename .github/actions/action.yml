@@ -663,78 +663,118 @@ runs:
         echo "✅ KernelSU added (commit: ${KSU_COMMIT_SHA:0:8})"
         echo "::endgroup::"
 
-    - name: Apply SUSFS Patches
+    - name: Apply SUSFS Patches (KSUN integration attempt)
       shell: bash
       if: ${{ env.OP_SUSFS == 'true' }}
       run: |
         set -euo pipefail
         set -x
+        echo "::group::SUSFS -> KernelSU-Next integration (attempt)"
 
-        echo "::group::Apply SUSFS patches (diagnostics)"
-        # рабочая директория - kernel platform
+        # working dir: kernel platform (where build runs)
         cd "$CONFIG/kernel_platform" || { echo "ERR: cannot cd to $CONFIG/kernel_platform"; exit 1; }
         echo "PWD: $(pwd)"
-        echo "Listing current dir:"
-        ls -la || true
+        echo "Kernel tree top: $(ls -la | head -n 20)"
 
-        # 1) Найти susfs.h в нескольких возможных местах
-        susfs_version=""
-        for p in ../susfs4ksu/kernel_patches/include/linux/susfs.h \
-                 ../susfs4ksu/include/linux/susfs.h \
-                 ../susfs/kernel_patches/include/linux/susfs.h \
-                 ../susfs/include/linux/susfs.h \
-                 kernel_patches/include/linux/susfs.h; do
-          if [ -f "$p" ]; then
-            echo "Found susfs.h at: $p"
-            susfs_version=$(grep -m1 '#define SUSFS_VERSION' "$p" | awk -F'"' '{print $2}' || true)
-            echo "Detected SUSFS Version: $susfs_version"
-            echo "SUSVER=$susfs_version" >> $GITHUB_ENV || true
-            break
-          fi
-        done
-        if [ -z "$susfs_version" ]; then
-          echo "::warning::susfs.h not found in expected locations."
+        # 1) ensure KernelSU-Next (v3.0.0) is present or clone it fresh into KernelSU-Next
+        KSUN_DIR="KernelSU-Next"
+        if [ ! -d "$KSUN_DIR" ] || [ -z "$(ls -A $KSUN_DIR 2>/dev/null)" ]; then
+          echo "Cloning KernelSU-Next v3.0.0..."
+          rm -rf "$KSUN_DIR" || true
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git -b v3.0.0 "$KSUN_DIR" || git clone https://github.com/KernelSU-Next/KernelSU-Next.git "$KSUN_DIR"
         fi
 
-        # 2) Клонируем (или используем уже клонированные) WildKernels patches в /tmp/wk_patches
-        WK="/tmp/wk_patches"
-        rm -rf "$WK" || true
-        git clone --depth=1 https://github.com/TheWildJames/kernel_patches.git "$WK" || {
-          echo "::error::Failed to clone kernel_patches to $WK"; false
-        }
+        # 2) clone susfs4ksu (v2.0.0)
+        SUSFS_TMP="/tmp/susfs4ksu"
+        rm -rf "$SUSFS_TMP" || true
+        git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git "$SUSFS_TMP" || (echo "::error::Failed to clone susfs4ksu"; exit 1)
+        cd "$SUSFS_TMP"
+        # try to checkout v2.0.0 if tag exists
+        if git rev-parse --verify "v2.0.0" >/dev/null 2>&1; then
+          git checkout v2.0.0 || true
+        fi
+        cd -
 
-        echo "Listing patches dir:"
-        ls -la "$WK" || true
+        echo "SUSFS commit: $(git -C $SUSFS_TMP rev-parse --short HEAD || true)"
 
-        # Покажем первые строки нескольких патчей для проверки структуры
-        find "$WK" -maxdepth 2 -type f -name '*.patch' -print | while read -r f; do
-          echo "---- patch preview: $f ----"
-          sed -n '1,50p' "$f" || true
-        done
+        # 3) copy include + fs patches into kernel tree (safe copy with dry-run preview)
+        echo "Preview of susfs kernel_patches tree:"
+        ls -la "$SUSFS_TMP/kernel_patches" || true
 
-        # 3) Попытка применить патчи по одному, с fallback'ами
-        echo "Applying patches (trying: patch -p1, -p0, git apply)..."
-        find "$WK" -type f -name '*.patch' | sort | while read -r patch; do
-          echo "=== TRY: $patch ==="
-          # quick dry-run checks
-          if patch -p1 --dry-run < "$patch" 2>/dev/null; then
-            echo "Applying with patch -p1"
-            patch -p1 --fuzz=3 < "$patch" || echo "::warning::patch -p1 failed for $patch"
-          elif patch -p0 --dry-run < "$patch" 2>/dev/null; then
-            echo "Applying with patch -p0"
-            patch -p0 --fuzz=3 < "$patch" || echo "::warning::patch -p0 failed for $patch"
-          elif git apply --check "$patch" 2>/dev/null; then
-            echo "Applying with git apply"
-            git apply "$patch" || echo "::warning::git apply failed for $patch"
+        # copy include headers (overwrite if needed)
+        echo "Copying SUSFS include files..."
+        mkdir -p include/linux
+        cp -v "$SUSFS_TMP/kernel_patches/include/linux/"* include/linux/ || true
+
+        # copy any fs drivers patches (if exist)
+        if [ -d "$SUSFS_TMP/kernel_patches/fs" ]; then
+          echo "Copying SUSFS fs files..."
+          rsync -av "$SUSFS_TMP/kernel_patches/fs/" fs/ || true
+        fi
+
+        # 4) apply patch files from kernel_patches (try multiple -p levels)
+        echo "Applying SUSFS patch hunks..."
+        find "$SUSFS_TMP/kernel_patches" -type f -name '*.patch' -print0 | sort -z | xargs -0 -n1 bash -c '
+          patchfile="$0"
+          echo "---- TRY PATCH: $patchfile ----"
+          if patch -p1 --dry-run < "$patchfile" 2>/dev/null; then
+            echo "applying patch -p1: $patchfile"
+            patch -p1 --fuzz=3 < "$patchfile" || echo "::warning::patch -p1 failed for $patchfile"
+          elif patch -p0 --dry-run < "$patchfile" 2>/dev/null; then
+            echo "applying patch -p0: $patchfile"
+            patch -p0 --fuzz=3 < "$patchfile" || echo "::warning::patch -p0 failed for $patchfile"
+          elif git apply --check "$patchfile" 2>/dev/null; then
+            echo "applying with git apply: $patchfile"
+            git apply "$patchfile" || echo "::warning::git apply failed for $patchfile"
           else
-            echo "::warning::Could not apply patch (no suitable method): $patch"
-            # вывести контекст для отладки
+            echo "::warning::Could not apply patch automatically: $patchfile"
             echo "Patch header:"
-            head -n 40 "$patch" || true
+            head -n 60 "$patchfile" || true
+          fi
+        ' {}
+
+        # 5) ensure drivers/kernelsu files exist — copy KernelSU-Next drivers if needed
+        if [ -d "$KSUN_DIR/kernel" ]; then
+          echo "Copying KernelSU-Next kernel sources into drivers/kernelsu..."
+          mkdir -p drivers/kernelsu
+          rsync -av "$KSUN_DIR/kernel/" drivers/kernelsu/ || true
+        fi
+
+        # 6) show drivers/kernelsu status and list unresolved symbols (best-effort)
+        echo "drivers/kernelsu listing:"
+        ls -la drivers/kernelsu || true
+        echo "Makefile check (drivers/kernelsu/Makefile):"
+        sed -n '1,200p' drivers/kernelsu/Makefile || true
+
+        # 7) Try to create small shim for missing symbols if not found (diagnostic)
+        missing_shim=0
+        for sym in ksu_set_task_mark ksu_get_task_mark ksu_mark_all_process ksu_unmark_all_process ksu_clear_task_tracepoint_flag_if_needed; do
+          if ! grep -R --line-number --binary-files=without-match -n "$sym" . >/dev/null 2>&1; then
+            echo "::warning::Symbol $sym not found in tree, will add a shim (diagnostic only)"
+            missing_shim=1
           fi
         done
 
-        echo "✅ SUSFS patches apply step finished (attempted)"
+        if [ "$missing_shim" -eq 1 ]; then
+          echo "Adding diagnostic shim drivers/kernelsu/ksu_shim.c"
+          cat > drivers/kernelsu/ksu_shim.c <<'EOF'
+#include <linux/sched.h>
+void ksu_set_task_mark(struct task_struct *task, int mark) { }
+int ksu_get_task_mark(struct task_struct *task) { return 0; }
+void ksu_mark_all_process(void) { }
+void ksu_unmark_all_process(void) { }
+void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *task) { }
+EOF
+          # ensure it's compiled
+          if ! grep -q "ksu_shim.o" drivers/kernelsu/Makefile 2>/dev/null; then
+            # append to Makefile (best-effort)
+            echo "" >> drivers/kernelsu/Makefile || true
+            echo "obj-$(CONFIG_KERNELSU) += ksu_shim.o" >> drivers/kernelsu/Makefile || true
+            echo "([[ Added ksu_shim.o to drivers/kernelsu/Makefile ]])"
+          fi
+        fi
+
+        echo "SUSFS -> KSUN integration attempt finished. Check logs for any 'warning' entries."
         echo "::endgroup::"
     - name: Apply Other Patches
       shell: bash

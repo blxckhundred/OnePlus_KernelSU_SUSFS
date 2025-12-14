@@ -468,8 +468,11 @@ runs:
           cd ./KernelSU
         fi
         
+        echo "Copying KernelSU SUSFS files..."
+        # COPY ALL FILES from kernel_patches/KernelSU (including ksu_susfs.c/h)
+        cp ../../../susfs4ksu/kernel_patches/KernelSU/* ./
+        
         echo "Applying base SUSFS patch to KernelSU..."
-        cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
         # Try applying base patch
         patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
         
@@ -487,7 +490,7 @@ runs:
           echo "⚠️ Fix directory not found (Is SUSFS < v2.0.0?), skipping manual fixes."
         fi
         
-        # --- FIX: FORCE KSU_SUSFS COMPILATION (FIXED PATH) ---
+        # --- FIX: FORCE KSU_SUSFS COMPILATION ---
         echo "🔧 Fixing Makefile for ksu_susfs..."
         if [ -f "kernel/Makefile" ]; then
             if ! grep -q "ksu_susfs.o" kernel/Makefile; then

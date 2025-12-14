@@ -668,67 +668,73 @@ runs:
       if: ${{ env.OP_SUSFS == 'true' }}
       run: |
         set -euo pipefail
-        echo "::group::Apply SUSFS patches"
-        cd "$CONFIG/kernel_platform"
-        
-        # 1. Определяем версию SUSFS
-        susfs_version=$(grep '#define SUSFS_VERSION' ../../susfs4ksu/kernel_patches/include/linux/susfs.h | awk -F'"' '{print $2}')
-        echo "Detected SUSFS Version: $susfs_version"
-        echo "SUSVER=$susfs_version" >> $GITHUB_ENV
+        set -x
 
-        # 2. Клонируем фиксы Джеймса (Hardcore Fix)
-        echo "⬇️ Cloning WildKernels patches..."
-        rm -rf /tmp/wk_patches
-        git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wk_patches
+        echo "::group::Apply SUSFS patches (diagnostics)"
+        # рабочая директория - kernel platform
+        cd "$CONFIG/kernel_platform" || { echo "ERR: cannot cd to $CONFIG/kernel_platform"; exit 1; }
+        echo "PWD: $(pwd)"
+        echo "Listing current dir:"
+        ls -la || true
 
-        # 3. Применяем патчи на ЯДРО (Kernel)
-        echo "Applying Kernel patches..."
-        cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch ./common/
-        cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
-        cp ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-        
-        # Основной патч ядра
-        patch -p1 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch
-
-        # 4. Патчим KernelSU (Самая важная часть для v3.0.0)
-        if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-          cd ./KernelSU-Next
-        else
-          cd ./KernelSU
-        fi
-
-        echo "Applying base SUSFS patch to KernelSU..."
-        cp ../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-        # Пытаемся применить стандартный патч, игнорируем ошибки, если он устарел
-        patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
-
-        echo "🚑 Applying MANUAL FIXES from WildKernels repo..."
-        # Если версия v2.0.0 (или новее), накатываем фиксы Джеймса
-        FIX_DIR="/tmp/wk_patches/next/susfs_fix_patches/v2.0.0"
-        
-        if [ -d "$FIX_DIR" ]; then
-          for patch_file in "$FIX_DIR"/*.patch; do
-            if [ -f "$patch_file" ]; then
-              echo "🔧 Applying fix: $(basename "$patch_file")"
-              patch -p1 --forward --fuzz=3 --ignore-whitespace -f < "$patch_file" || echo "⚠️ Fix $(basename "$patch_file") skipped"
-            fi
-          done
-        else
-          echo "⚠️ Fix directory not found (Is SUSFS < v2.0.0?), skipping manual fixes."
-        fi
-        
-        cd ..
-        
-        # 5. Костыль для Android 12 (vma_pages fix)
-        cd ./common
-        if [ "${{ env.ANDROID_VER }}" = "android12" ] && [ "${{ env.KERNEL_VER }}" = "5.10" ]; then
-          if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
-             echo "Applying Android 12 vma_pages workaround..."
-             sed -i -e 's/return 0;/goto show_pad;/' ./fs/proc/task_mmu.c || true
+        # 1) Найти susfs.h в нескольких возможных местах
+        susfs_version=""
+        for p in ../susfs4ksu/kernel_patches/include/linux/susfs.h \
+                 ../susfs4ksu/include/linux/susfs.h \
+                 ../susfs/kernel_patches/include/linux/susfs.h \
+                 ../susfs/include/linux/susfs.h \
+                 kernel_patches/include/linux/susfs.h; do
+          if [ -f "$p" ]; then
+            echo "Found susfs.h at: $p"
+            susfs_version=$(grep -m1 '#define SUSFS_VERSION' "$p" | awk -F'"' '{print $2}' || true)
+            echo "Detected SUSFS Version: $susfs_version"
+            echo "SUSVER=$susfs_version" >> $GITHUB_ENV || true
+            break
           fi
+        done
+        if [ -z "$susfs_version" ]; then
+          echo "::warning::susfs.h not found in expected locations."
         fi
 
-        echo "✅ SUSFS patches applied successfully"
+        # 2) Клонируем (или используем уже клонированные) WildKernels patches в /tmp/wk_patches
+        WK="/tmp/wk_patches"
+        rm -rf "$WK" || true
+        git clone --depth=1 https://github.com/TheWildJames/kernel_patches.git "$WK" || {
+          echo "::error::Failed to clone kernel_patches to $WK"; false
+        }
+
+        echo "Listing patches dir:"
+        ls -la "$WK" || true
+
+        # Покажем первые строки нескольких патчей для проверки структуры
+        find "$WK" -maxdepth 2 -type f -name '*.patch' -print | while read -r f; do
+          echo "---- patch preview: $f ----"
+          sed -n '1,50p' "$f" || true
+        done
+
+        # 3) Попытка применить патчи по одному, с fallback'ами
+        echo "Applying patches (trying: patch -p1, -p0, git apply)..."
+        find "$WK" -type f -name '*.patch' | sort | while read -r patch; do
+          echo "=== TRY: $patch ==="
+          # quick dry-run checks
+          if patch -p1 --dry-run < "$patch" 2>/dev/null; then
+            echo "Applying with patch -p1"
+            patch -p1 --fuzz=3 < "$patch" || echo "::warning::patch -p1 failed for $patch"
+          elif patch -p0 --dry-run < "$patch" 2>/dev/null; then
+            echo "Applying with patch -p0"
+            patch -p0 --fuzz=3 < "$patch" || echo "::warning::patch -p0 failed for $patch"
+          elif git apply --check "$patch" 2>/dev/null; then
+            echo "Applying with git apply"
+            git apply "$patch" || echo "::warning::git apply failed for $patch"
+          else
+            echo "::warning::Could not apply patch (no suitable method): $patch"
+            # вывести контекст для отладки
+            echo "Patch header:"
+            head -n 40 "$patch" || true
+          fi
+        done
+
+        echo "✅ SUSFS patches apply step finished (attempted)"
         echo "::endgroup::"
     - name: Apply Other Patches
       shell: bash

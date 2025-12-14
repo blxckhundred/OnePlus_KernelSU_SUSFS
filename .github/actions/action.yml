@@ -757,7 +757,7 @@ runs:
 
         if [ "$missing_shim" -eq 1 ]; then
           echo "Adding diagnostic shim drivers/kernelsu/ksu_shim.c"
-          cat > drivers/kernelsu/ksu_shim.c <<'EOF'
+        cat > drivers/kernelsu/ksu_shim.c <<'EOF'
 #include <linux/sched.h>
 void ksu_set_task_mark(struct task_struct *task, int mark) { }
 int ksu_get_task_mark(struct task_struct *task) { return 0; }
@@ -765,6 +765,7 @@ void ksu_mark_all_process(void) { }
 void ksu_unmark_all_process(void) { }
 void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *task) { }
 EOF
+
           # ensure it's compiled
           if ! grep -q "ksu_shim.o" drivers/kernelsu/Makefile 2>/dev/null; then
             # append to Makefile (best-effort)
